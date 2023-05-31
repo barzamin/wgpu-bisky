@@ -3,15 +3,19 @@ use std::{fs, iter};
 use anyhow::Result;
 use pollster::FutureExt;
 use wgpu::{
-    Adapter, Backends, Color, CommandEncoderDescriptor, CompositeAlphaMode, Device,
-    DeviceDescriptor, Features, FragmentState, FrontFace, Instance, InstanceDescriptor, Limits,
-    MultisampleState, PipelineLayout, PipelineLayoutDescriptor, PolygonMode, PresentMode,
-    PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, ShaderModule,
-    ShaderModuleDescriptor, Surface, SurfaceConfiguration, TextureUsages, TextureView,
-    TextureViewDescriptor, VertexState, SurfaceTexture,
+    Adapter, Backends, BlendState, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor,
+    CompareFunction, CompositeAlphaMode, DepthBiasState, DepthStencilState, Device,
+    DeviceDescriptor, Extent3d, Features, FragmentState, FrontFace, Instance, InstanceDescriptor,
+    Limits, MultisampleState, PipelineLayout, PipelineLayoutDescriptor, PolygonMode, PresentMode,
+    PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment,
+    RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, RequestAdapterOptions, ShaderModule, ShaderModuleDescriptor,
+    StencilState, Surface, SurfaceConfiguration, SurfaceTexture, Texture, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    VertexState,
 };
 use winit::{
+    dpi::PhysicalSize,
     event::{Event, WindowEvent},
     event_loop::EventLoop,
     window::{Window, WindowBuilder},
@@ -24,16 +28,104 @@ struct Renderer {
     queue: Queue,
     pipe: RenderPipeline,
 
-    window_surface: Surface,
+    output: MainRenderTarget,
+}
+
+struct MainRenderTarget {
+    width: u32,
+    height: u32,
+
+    surface: Surface,
+    depth_buffer: Texture,
+    surface_format: TextureFormat,
+}
+
+impl MainRenderTarget {
+    pub const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
+
+    fn create_depthbuf(device: &Device, width: u32, height: u32) -> Texture {
+        device.create_texture(&TextureDescriptor {
+            dimension: TextureDimension::D2,
+            label: Some("texture:depth"),
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            format: Self::DEPTH_FORMAT,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+    }
+
+    fn config_surface(
+        device: &Device,
+        surface: &Surface,
+        surface_format: TextureFormat,
+        width: u32,
+        height: u32,
+    ) {
+        surface.configure(
+            device,
+            &SurfaceConfiguration {
+                usage: TextureUsages::RENDER_ATTACHMENT,
+                format: surface_format,
+                width: width,
+                height: height,
+                present_mode: PresentMode::Fifo,
+                alpha_mode: CompositeAlphaMode::Opaque,
+                view_formats: vec![],
+            },
+        );
+    }
+
+    pub fn from_window_surface(
+        device: &Device,
+        surface: Surface,
+        surface_format: TextureFormat,
+        dims: PhysicalSize<u32>,
+    ) -> Self {
+        Self::config_surface(device, &surface, surface_format, dims.width, dims.height);
+
+        Self {
+            width: dims.width,
+            height: dims.height,
+
+            surface,
+            surface_format,
+            depth_buffer: Self::create_depthbuf(device, dims.width, dims.height),
+        }
+    }
+
+    fn resize(&mut self, device: &Device, inner_size: PhysicalSize<u32>) {
+        Self::config_surface(
+            device,
+            &self.surface,
+            self.surface_format,
+            inner_size.width,
+            inner_size.height,
+        );
+        self.depth_buffer = Self::create_depthbuf(device, inner_size.width, inner_size.height);
+    }
 }
 
 impl Renderer {
     pub fn draw(&mut self) -> Result<()> {
-        let window_tex = self.window_surface.get_current_texture()?;
+        let window_tex = self.output.surface.get_current_texture()?;
         let window_view = window_tex.texture.create_view(&TextureViewDescriptor {
-            label: Some("surface:window:view"),
+            label: Some("view:output-color"),
             ..Default::default()
         });
+
+        let depth_view = self
+            .output
+            .depth_buffer
+            .create_view(&TextureViewDescriptor {
+                label: Some("view:output-depth"),
+                ..Default::default()
+            });
 
         let mut encoder = self
             .device
@@ -43,7 +135,7 @@ impl Renderer {
 
         {
             let _rp = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("pass:test"),
+                label: Some("pass:clear"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &window_view,
                     resolve_target: None,
@@ -57,8 +149,41 @@ impl Renderer {
                         store: true,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: true,
+                    }),
+                    stencil_ops: None,
+                }),
             });
+            // rp.set_pipeline(&self.pipe);
+            // rp.draw_indexe
+        }
+
+        {
+            let mut rp = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("pass:0"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &window_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    }),
+                    stencil_ops: None,
+                }),
+            });
+            rp.set_pipeline(&self.pipe);
+            rp.draw(0..3, 0..1);
         }
 
         self.queue.submit(iter::once(encoder.finish()));
@@ -98,8 +223,6 @@ impl Renderer {
             )
             .await?;
 
-        let win_inner_size = window.inner_size();
-
         // find a surface format
         let surf_format = window_surface
             .get_capabilities(&adapter)
@@ -111,17 +234,11 @@ impl Renderer {
             .expect("no srgb surface format");
         log::debug!("surf_formats={:?}", surf_format);
 
-        window_surface.configure(
+        let output = MainRenderTarget::from_window_surface(
             &device,
-            &SurfaceConfiguration {
-                usage: TextureUsages::RENDER_ATTACHMENT,
-                format: surf_format,
-                width: win_inner_size.width,
-                height: win_inner_size.height,
-                present_mode: PresentMode::Fifo,
-                alpha_mode: CompositeAlphaMode::Opaque,
-                view_formats: vec![],
-            },
+            window_surface,
+            surf_format,
+            window.inner_size(),
         );
 
         let shader_module = device.create_shader_module(ShaderModuleDescriptor {
@@ -146,7 +263,11 @@ impl Renderer {
             fragment: Some(FragmentState {
                 module: &shader_module,
                 entry_point: "frag_main",
-                targets: &[],
+                targets: &[Some(ColorTargetState {
+                    format: output.surface_format,
+                    blend: Some(BlendState::REPLACE),
+                    write_mask: ColorWrites::ALL,
+                })],
             }),
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleList,
@@ -157,7 +278,13 @@ impl Renderer {
                 cull_mode: Some(wgpu::Face::Back),
                 unclipped_depth: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(DepthStencilState {
+                format: MainRenderTarget::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::LessEqual,
+                stencil: StencilState::default(),
+                bias: DepthBiasState::default(),
+            }),
             multisample: MultisampleState {
                 count: 1,
                 mask: !0,
@@ -171,9 +298,15 @@ impl Renderer {
             adapter,
             device,
             queue,
-            window_surface,
+            output,
             pipe,
         })
+    }
+
+    fn resize(&mut self, inner_size: winit::dpi::PhysicalSize<u32>) {
+        log::info!("resized to {:?}", inner_size);
+
+        self.output.resize(&self.device, inner_size);
     }
 }
 
@@ -190,10 +323,14 @@ async fn run() -> Result<()> {
         match ev {
             Event::WindowEvent {
                 window_id,
-                event: WindowEvent::CloseRequested,
-            } => {
-                flow.set_exit();
-            }
+                event: window_event,
+            } => match window_event {
+                WindowEvent::CloseRequested => flow.set_exit(),
+                WindowEvent::Resized(_) => {
+                    renderer.resize(window.inner_size());
+                }
+                _ => (),
+            },
 
             Event::MainEventsCleared => {
                 window.request_redraw();
