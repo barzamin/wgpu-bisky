@@ -1,18 +1,19 @@
-use std::{fs, iter};
+use std::{fs, iter, mem};
 
 use anyhow::Result;
 use pollster::FutureExt;
 use wgpu::{
-    Adapter, Backends, BlendState, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor,
-    CompareFunction, CompositeAlphaMode, DepthBiasState, DepthStencilState, Device,
-    DeviceDescriptor, Extent3d, Features, FragmentState, FrontFace, Instance, InstanceDescriptor,
-    Limits, MultisampleState, PipelineLayout, PipelineLayoutDescriptor, PolygonMode, PresentMode,
-    PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment,
-    RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, RequestAdapterOptions, ShaderModule, ShaderModuleDescriptor,
-    StencilState, Surface, SurfaceConfiguration, SurfaceTexture, Texture, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
-    VertexState,
+    util::{BufferInitDescriptor, DeviceExt},
+    Adapter, Backends, BlendState, BufferUsages, ColorTargetState, ColorWrites,
+    CommandEncoderDescriptor, CompareFunction, CompositeAlphaMode, DepthBiasState,
+    DepthStencilState, Device, Extent3d, Features, FragmentState, FrontFace,
+    Instance, InstanceDescriptor, Limits, MultisampleState,
+    PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology, Queue,
+    RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor,
+    RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions,
+    ShaderModuleDescriptor, StencilState, Surface, SurfaceConfiguration, Texture,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    TextureViewDescriptor, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState,
 };
 use winit::{
     dpi::PhysicalSize,
@@ -29,6 +30,9 @@ struct Renderer {
     pipe: RenderPipeline,
 
     output: MainRenderTarget,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    n_indices: usize,
 }
 
 struct MainRenderTarget {
@@ -183,7 +187,9 @@ impl Renderer {
                 }),
             });
             rp.set_pipeline(&self.pipe);
-            rp.draw(0..3, 0..1);
+            rp.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            rp.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..self.n_indices as u32, 0, 0..1);
         }
 
         self.queue.submit(iter::once(encoder.finish()));
@@ -258,7 +264,16 @@ impl Renderer {
             vertex: VertexState {
                 module: &shader_module,
                 entry_point: "vert_main",
-                buffers: &[],
+                buffers: &[VertexBufferLayout {
+                    // slot 0
+                    array_stride: (mem::size_of::<f32>() * 3) as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[VertexAttribute {
+                        format: VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
             },
             fragment: Some(FragmentState {
                 module: &shader_module,
@@ -293,6 +308,21 @@ impl Renderer {
             multiview: None,
         });
 
+        let (bunny_model, _) = tobj::load_obj("./bunny.obj", &tobj::LoadOptions::default())?;
+        let bunny_model = bunny_model.first().expect("should have 1 object in obj");
+
+        let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("buffer:bunny-verts"),
+            contents: bytemuck::cast_slice(&bunny_model.mesh.positions[..]),
+            usage: BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("buffer:bunny-idxs"),
+            contents: bytemuck::cast_slice(&bunny_model.mesh.indices[..]),
+            usage: BufferUsages::INDEX,
+        });
+
         Ok(Self {
             instance,
             adapter,
@@ -300,6 +330,9 @@ impl Renderer {
             queue,
             output,
             pipe,
+            vertex_buffer,
+            index_buffer,
+            n_indices: bunny_model.mesh.indices.len(),
         })
     }
 
@@ -315,8 +348,6 @@ async fn run() -> Result<()> {
     let evloop = EventLoop::new();
     let window = WindowBuilder::new().build(&evloop)?;
     let mut renderer = Renderer::new(&window).await?;
-
-    // let device = adapter.
 
     evloop.run(move |ev, tgt, flow| {
         flow.set_poll();
