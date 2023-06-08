@@ -1,19 +1,22 @@
-use std::{fs, iter, mem};
+use std::{fs, iter, mem, ops::Range};
 
 use anyhow::Result;
+use bytemuck::{Pod, Zeroable};
 use pollster::FutureExt;
+use ultraviolet::{projection::orthographic_wgpu_dx, Mat4, Vec3, Vec4};
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
-    Adapter, Backends, BlendState, BufferUsages, ColorTargetState, ColorWrites,
+    Adapter, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BlendState, BufferUsages, ColorTargetState, ColorWrites,
     CommandEncoderDescriptor, CompareFunction, CompositeAlphaMode, DepthBiasState,
-    DepthStencilState, Device, Extent3d, Features, FragmentState, FrontFace,
-    Instance, InstanceDescriptor, Limits, MultisampleState,
-    PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology, Queue,
-    RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor,
-    RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions,
-    ShaderModuleDescriptor, StencilState, Surface, SurfaceConfiguration, Texture,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    TextureViewDescriptor, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState,
+    DepthStencilState, Device, DeviceDescriptor, Extent3d, Features, FragmentState, FrontFace,
+    Instance, InstanceDescriptor, Limits, MultisampleState, PipelineLayoutDescriptor, PolygonMode,
+    PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment,
+    RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, RequestAdapterOptions, ShaderModuleDescriptor, ShaderStages,
+    StencilState, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout,
+    VertexFormat, VertexState,
 };
 use winit::{
     dpi::PhysicalSize,
@@ -21,6 +24,78 @@ use winit::{
     event_loop::EventLoop,
     window::{Window, WindowBuilder},
 };
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct CameraUniforms {
+    view: Mat4,
+    project: Mat4,
+}
+
+impl CameraUniforms {
+    pub fn new() -> Self {
+        // Iᵀ = I
+        Self {
+            view: Mat4::identity(),
+            project: Mat4::identity(),
+        }
+    }
+}
+
+trait ComputeCameraUniforms {
+    fn compute_camera_uniforms(&self) -> CameraUniforms;
+}
+
+struct OrthoCamera {
+    position: Vec3,
+    aimdir: Vec3,
+    up: Vec3,
+
+    aspect: f32,
+    zrange: Range<f32>,
+}
+
+impl OrthoCamera {
+    pub fn new(position: Vec3, aimdir: Vec3, up: Vec3, aspect: f32, zrange: Range<f32>) -> Self {
+        Self {
+            position,
+            aimdir,
+            up,
+            aspect,
+            zrange,
+        }
+    }
+}
+
+impl ComputeCameraUniforms for OrthoCamera {
+    fn compute_camera_uniforms(&self) -> CameraUniforms {
+        let fwd = self.aimdir.normalized();
+        let right = fwd.cross(self.up).normalized();
+        let up = right.cross(fwd);
+        let view = Mat4::new(
+            Vec4::new(right.x, up.x, -fwd.x, 0.0),
+            Vec4::new(right.y, up.y, -fwd.y, 0.0),
+            Vec4::new(right.z, up.z, -fwd.z, 0.0),
+            Vec4::new(
+                -right.dot(self.position),
+                -up.dot(self.position),
+                fwd.dot(self.position),
+                1.0,
+            ),
+        );
+
+        let project = orthographic_wgpu_dx(
+            -1.,
+            1.,
+            -self.aspect,
+            self.aspect,
+            self.zrange.start,
+            self.zrange.end,
+        );
+
+        CameraUniforms { view, project }
+    }
+}
 
 struct Renderer {
     instance: Instance,
@@ -33,6 +108,7 @@ struct Renderer {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     n_indices: usize,
+    cam_bind_group: wgpu::BindGroup,
 }
 
 struct MainRenderTarget {
@@ -162,8 +238,6 @@ impl Renderer {
                     stencil_ops: None,
                 }),
             });
-            // rp.set_pipeline(&self.pipe);
-            // rp.draw_indexe
         }
 
         {
@@ -187,6 +261,7 @@ impl Renderer {
                 }),
             });
             rp.set_pipeline(&self.pipe);
+            rp.set_bind_group(0, &self.cam_bind_group, &[]);
             rp.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             rp.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             rp.draw_indexed(0..self.n_indices as u32, 0, 0..1);
@@ -252,14 +327,55 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(fs::read_to_string("src/shaders/pipe0.wgsl")?.into()),
         });
 
+        let cam_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("bindgroup-layout:camera"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let aspect = window.inner_size().width as f32 / window.inner_size().height as f32;
+        let camera = OrthoCamera::new(
+            Vec3::new(0., 0., 3.),
+            Vec3::new(0., 0., -1.),
+            Vec3::new(0., 1., 0.),
+            aspect,
+            0.1..10.0,
+        );
+        let cam_uniforms = camera.compute_camera_uniforms();
+
+        let cam_uniform_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("buffer:uniform:camera"),
+            contents: bytemuck::bytes_of(&cam_uniforms),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+
+        let cam_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("bindgroup:camera"),
+            layout: &cam_bind_group_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(
+                    cam_uniform_buffer.as_entire_buffer_binding(),
+                ),
+            }],
+        });
+
         let pipelayout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("pipe0:layout"),
-            bind_group_layouts: &[],
+            label: Some("pipe-layout:0"),
+            bind_group_layouts: &[&cam_bind_group_layout],
             push_constant_ranges: &[],
         });
 
         let pipe = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("pipe0"),
+            label: Some("pipe:0"),
             layout: Some(&pipelayout),
             vertex: VertexState {
                 module: &shader_module,
@@ -333,6 +449,7 @@ impl Renderer {
             vertex_buffer,
             index_buffer,
             n_indices: bunny_model.mesh.indices.len(),
+            cam_bind_group,
         })
     }
 
