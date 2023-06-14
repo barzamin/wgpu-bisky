@@ -1,22 +1,12 @@
+use anyhow::Result;
+use log::debug;
+use pollster::FutureExt;
 use std::{fs, iter, mem, ops::Range};
 
-use anyhow::Result;
-use bytemuck::{Pod, Zeroable};
-use pollster::FutureExt;
-use ultraviolet::{projection::orthographic_wgpu_dx, Mat4, Vec3, Vec4};
 use wgpu::{
-    util::{BufferInitDescriptor, DeviceExt},
-    Adapter, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BlendState, BufferUsages, ColorTargetState, ColorWrites,
-    CommandEncoderDescriptor, CompareFunction, CompositeAlphaMode, DepthBiasState,
-    DepthStencilState, Device, DeviceDescriptor, Extent3d, Features, FragmentState, FrontFace,
-    Instance, InstanceDescriptor, Limits, MultisampleState, PipelineLayoutDescriptor, PolygonMode,
-    PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment,
-    RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, RequestAdapterOptions, ShaderModuleDescriptor, ShaderStages,
-    StencilState, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension,
-    TextureFormat, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout,
-    VertexFormat, VertexState,
+    Adapter, Backends, CompositeAlphaMode, Device, DeviceDescriptor, Features, Instance,
+    InstanceDescriptor, Limits, PresentMode, Queue, RequestAdapterOptions, Surface,
+    SurfaceConfiguration, TextureFormat, TextureUsages, CommandEncoderDescriptor, RenderPassDescriptor, RenderPassColorAttachment, TextureViewDescriptor,
 };
 use winit::{
     dpi::PhysicalSize,
@@ -25,83 +15,15 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-struct CameraUniforms {
-    view: Mat4,
-    project: Mat4,
-}
+mod camera;
 
-impl CameraUniforms {
-    pub fn new() -> Self {
-        // Iᵀ = I
-        Self {
-            view: Mat4::identity(),
-            project: Mat4::identity(),
-        }
-    }
-}
-
-trait ComputeCameraUniforms {
-    fn compute_camera_uniforms(&self) -> CameraUniforms;
-}
-
-struct OrthoCamera {
-    position: Vec3,
-    aimdir: Vec3,
-    up: Vec3,
-
-    aspect: f32,
-    zrange: Range<f32>,
-}
-
-impl OrthoCamera {
-    pub fn new(position: Vec3, aimdir: Vec3, up: Vec3, aspect: f32, zrange: Range<f32>) -> Self {
-        Self {
-            position,
-            aimdir,
-            up,
-            aspect,
-            zrange,
-        }
-    }
-}
-
-impl ComputeCameraUniforms for OrthoCamera {
-    fn compute_camera_uniforms(&self) -> CameraUniforms {
-        let fwd = self.aimdir.normalized();
-        let right = fwd.cross(self.up).normalized();
-        let up = right.cross(fwd);
-        let view = Mat4::new(
-            Vec4::new(right.x, up.x, -fwd.x, 0.0),
-            Vec4::new(right.y, up.y, -fwd.y, 0.0),
-            Vec4::new(right.z, up.z, -fwd.z, 0.0),
-            Vec4::new(
-                -right.dot(self.position),
-                -up.dot(self.position),
-                fwd.dot(self.position),
-                1.0,
-            ),
-        );
-
-        let project = orthographic_wgpu_dx(
-            -1.,
-            1.,
-            -self.aspect,
-            self.aspect,
-            self.zrange.start,
-            self.zrange.end,
-        );
-
-        CameraUniforms { view, project }
-    }
-}
-
-struct Renderer {
+struct RenderCtx {
     instance: Instance,
     adapter: Adapter,
     device: Device,
     queue: Queue,
+}
+/*
     pipe: RenderPipeline,
 
     output: MainRenderTarget,
@@ -110,170 +32,90 @@ struct Renderer {
     n_indices: usize,
     cam_bind_group: wgpu::BindGroup,
 }
+*/
 
-struct MainRenderTarget {
-    width: u32,
-    height: u32,
-
+struct OutputSurface {
     surface: Surface,
-    depth_buffer: Texture,
-    surface_format: TextureFormat,
+    config: SurfaceConfiguration,
+    // depth_buffer: Texture,
+    format: TextureFormat,
+    dims: PhysicalSize<u32>,
 }
 
-impl MainRenderTarget {
-    pub const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
+impl OutputSurface {
+    // pub const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
-    fn create_depthbuf(device: &Device, width: u32, height: u32) -> Texture {
-        device.create_texture(&TextureDescriptor {
-            dimension: TextureDimension::D2,
-            label: Some("texture:depth"),
-            size: Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            format: Self::DEPTH_FORMAT,
-            usage: TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        })
-    }
-
-    fn config_surface(
-        device: &Device,
-        surface: &Surface,
-        surface_format: TextureFormat,
-        width: u32,
-        height: u32,
-    ) {
-        surface.configure(
-            device,
-            &SurfaceConfiguration {
-                usage: TextureUsages::RENDER_ATTACHMENT,
-                format: surface_format,
-                width: width,
-                height: height,
-                present_mode: PresentMode::Fifo,
-                alpha_mode: CompositeAlphaMode::Opaque,
-                view_formats: vec![],
-            },
-        );
-    }
+    // fn create_depthbuf(device: &Device, width: u32, height: u32) -> Texture {
+    //     device.create_texture(&TextureDescriptor {
+    //         dimension: TextureDimension::D2,
+    //         label: Some("texture:depth"),
+    //         size: Extent3d {
+    //             width,
+    //             height,
+    //             depth_or_array_layers: 1,
+    //         },
+    //         mip_level_count: 1,
+    //         sample_count: 1,
+    //         format: Self::DEPTH_FORMAT,
+    //         usage: TextureUsages::RENDER_ATTACHMENT,
+    //         view_formats: &[],
+    //     })
+    // }
 
     pub fn from_window_surface(
-        device: &Device,
-        surface: Surface,
-        surface_format: TextureFormat,
+        rctx: &RenderCtx,
+        window_surface: Surface,
         dims: PhysicalSize<u32>,
     ) -> Self {
-        Self::config_surface(device, &surface, surface_format, dims.width, dims.height);
+        // find a surface format
+        let surface_format = window_surface
+            .get_capabilities(&rctx.adapter)
+            .formats
+            .iter()
+            .filter(|fmt| fmt.is_srgb())
+            .copied()
+            .next()
+            .expect("no srgb surface format");
+        log::debug!(
+            "create_window_surface: surface_formats={:?}",
+            surface_format
+        );
 
-        Self {
+        let config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
             width: dims.width,
             height: dims.height,
+            present_mode: PresentMode::Fifo,
+            alpha_mode: CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+        };
 
-            surface,
-            surface_format,
-            depth_buffer: Self::create_depthbuf(device, dims.width, dims.height),
+        window_surface.configure(&rctx.device, &config);
+
+        Self {
+            surface: window_surface,
+            config,
+            format: surface_format,
+            dims,
         }
     }
 
-    fn resize(&mut self, device: &Device, inner_size: PhysicalSize<u32>) {
-        Self::config_surface(
-            device,
-            &self.surface,
-            self.surface_format,
-            inner_size.width,
-            inner_size.height,
-        );
-        self.depth_buffer = Self::create_depthbuf(device, inner_size.width, inner_size.height);
+    fn resize(&mut self, rctx: &RenderCtx, inner_size: PhysicalSize<u32>) {
+        debug!("resizing OutputSurface to {:?}", inner_size);
+        self.dims = inner_size;
+        self.config.width = inner_size.width;
+        self.config.height = inner_size.height;
+        self.reconfigure(rctx);
+    }
+
+    fn reconfigure(&self, rctx: &RenderCtx) {
+        self.surface.configure(&rctx.device, &self.config);
     }
 }
 
-impl Renderer {
-    pub fn draw(&mut self) -> Result<()> {
-        let window_tex = self.output.surface.get_current_texture()?;
-        let window_view = window_tex.texture.create_view(&TextureViewDescriptor {
-            label: Some("view:output-color"),
-            ..Default::default()
-        });
-
-        let depth_view = self
-            .output
-            .depth_buffer
-            .create_view(&TextureViewDescriptor {
-                label: Some("view:output-depth"),
-                ..Default::default()
-            });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("encoder0"),
-            });
-
-        {
-            let _rp = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("pass:clear"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &window_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.8,
-                            g: 0.2,
-                            b: 0.7,
-                            a: 1.0,
-                        }),
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: true,
-                    }),
-                    stencil_ops: None,
-                }),
-            });
-        }
-
-        {
-            let mut rp = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("pass:0"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &window_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: true,
-                    }),
-                    stencil_ops: None,
-                }),
-            });
-            rp.set_pipeline(&self.pipe);
-            rp.set_bind_group(0, &self.cam_bind_group, &[]);
-            rp.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            rp.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..self.n_indices as u32, 0, 0..1);
-        }
-
-        self.queue.submit(iter::once(encoder.finish()));
-        window_tex.present();
-
-        Ok(())
-    }
-
-    pub async fn new(window: &Window) -> Result<Self> {
+impl RenderCtx {
+    pub async fn with_window(window: &Window) -> Result<(Self, Surface)> {
         let instance = Instance::new(InstanceDescriptor {
             backends: Backends::DX12 | Backends::VULKAN | Backends::METAL,
             dx12_shader_compiler: wgpu::Dx12Compiler::Dxc {
@@ -304,159 +146,39 @@ impl Renderer {
             )
             .await?;
 
-        // find a surface format
-        let surf_format = window_surface
-            .get_capabilities(&adapter)
-            .formats
-            .iter()
-            .filter(|fmt| fmt.is_srgb())
-            .copied()
-            .next()
-            .expect("no srgb surface format");
-        log::debug!("surf_formats={:?}", surf_format);
-
-        let output = MainRenderTarget::from_window_surface(
-            &device,
+        Ok((
+            Self {
+                instance,
+                adapter,
+                device,
+                queue,
+            },
             window_surface,
-            surf_format,
-            window.inner_size(),
-        );
-
-        let shader_module = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("pipe0:shader"),
-            source: wgpu::ShaderSource::Wgsl(fs::read_to_string("src/shaders/pipe0.wgsl")?.into()),
-        });
-
-        let cam_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("bindgroup-layout:camera"),
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let aspect = window.inner_size().width as f32 / window.inner_size().height as f32;
-        let camera = OrthoCamera::new(
-            Vec3::new(0., 0., 3.),
-            Vec3::new(0., 0., -1.),
-            Vec3::new(0., 1., 0.),
-            aspect,
-            0.1..10.0,
-        );
-        let cam_uniforms = camera.compute_camera_uniforms();
-
-        let cam_uniform_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("buffer:uniform:camera"),
-            contents: bytemuck::bytes_of(&cam_uniforms),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        });
-
-        let cam_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("bindgroup:camera"),
-            layout: &cam_bind_group_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(
-                    cam_uniform_buffer.as_entire_buffer_binding(),
-                ),
-            }],
-        });
-
-        let pipelayout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("pipe-layout:0"),
-            bind_group_layouts: &[&cam_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipe = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("pipe:0"),
-            layout: Some(&pipelayout),
-            vertex: VertexState {
-                module: &shader_module,
-                entry_point: "vert_main",
-                buffers: &[VertexBufferLayout {
-                    // slot 0
-                    array_stride: (mem::size_of::<f32>() * 3) as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[VertexAttribute {
-                        format: VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
-                }],
-            },
-            fragment: Some(FragmentState {
-                module: &shader_module,
-                entry_point: "frag_main",
-                targets: &[Some(ColorTargetState {
-                    format: output.surface_format,
-                    blend: Some(BlendState::REPLACE),
-                    write_mask: ColorWrites::ALL,
-                })],
-            }),
-            primitive: PrimitiveState {
-                topology: PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                polygon_mode: PolygonMode::Fill,
-                conservative: false,
-                front_face: FrontFace::Ccw, // rhs
-                cull_mode: Some(wgpu::Face::Back),
-                unclipped_depth: false,
-            },
-            depth_stencil: Some(DepthStencilState {
-                format: MainRenderTarget::DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: CompareFunction::LessEqual,
-                stencil: StencilState::default(),
-                bias: DepthBiasState::default(),
-            }),
-            multisample: MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
-
-        let (bunny_model, _) = tobj::load_obj("./bunny.obj", &tobj::LoadOptions::default())?;
-        let bunny_model = bunny_model.first().expect("should have 1 object in obj");
-
-        let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("buffer:bunny-verts"),
-            contents: bytemuck::cast_slice(&bunny_model.mesh.positions[..]),
-            usage: BufferUsages::VERTEX,
-        });
-
-        let index_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("buffer:bunny-idxs"),
-            contents: bytemuck::cast_slice(&bunny_model.mesh.indices[..]),
-            usage: BufferUsages::INDEX,
-        });
-
-        Ok(Self {
-            instance,
-            adapter,
-            device,
-            queue,
-            output,
-            pipe,
-            vertex_buffer,
-            index_buffer,
-            n_indices: bunny_model.mesh.indices.len(),
-            cam_bind_group,
-        })
+        ))
     }
+}
 
-    fn resize(&mut self, inner_size: winit::dpi::PhysicalSize<u32>) {
-        log::info!("resized to {:?}", inner_size);
+struct EguiState {
+    pub ctx: egui::Context,
 
-        self.output.resize(&self.device, inner_size);
+    pub winit: egui_winit::State,
+    pub renderer: egui_wgpu::Renderer,
+}
+
+impl EguiState {
+    pub fn new(window: &Window, device: &Device, fb_format: TextureFormat) -> Self {
+        debug!("init egui backends");
+
+        let context = egui::Context::default();
+        let mut winit_state = egui_winit::State::new(window);
+        winit_state.set_pixels_per_point(window.scale_factor() as f32);
+        let renderer = egui_wgpu::renderer::Renderer::new(device, fb_format, None, 1);
+
+        Self {
+            ctx: context,
+            winit: winit_state,
+            renderer,
+        }
     }
 }
 
@@ -464,7 +186,13 @@ async fn run() -> Result<()> {
     env_logger::init();
     let evloop = EventLoop::new();
     let window = WindowBuilder::new().build(&evloop)?;
-    let mut renderer = Renderer::new(&window).await?;
+    let (mut rctx, window_surface) = RenderCtx::with_window(&window).await?;
+    let mut ctx = egui::Context::default();
+    let mut output_surface =
+        OutputSurface::from_window_surface(&rctx, window_surface, window.inner_size());
+
+    let mut egui_state = EguiState::new(&window, &rctx.device, output_surface.format);
+    let mut demo_app = egui_demo_lib::DemoWindows::default();
 
     evloop.run(move |ev, tgt, flow| {
         flow.set_poll();
@@ -472,21 +200,86 @@ async fn run() -> Result<()> {
             Event::WindowEvent {
                 window_id,
                 event: window_event,
-            } => match window_event {
-                WindowEvent::CloseRequested => flow.set_exit(),
-                WindowEvent::Resized(_) => {
-                    renderer.resize(window.inner_size());
+            } => {
+                let response = egui_state.winit.on_event(&egui_state.ctx, &window_event);
+
+                if !response.consumed {
+                    match window_event {
+                        WindowEvent::CloseRequested => flow.set_exit(),
+                        WindowEvent::Resized(_) => {
+                            // egui_state.renderer.
+                            output_surface.resize(&rctx, window.inner_size());
+                        }
+                        _ => (),
+                    }
                 }
-                _ => (),
-            },
+            }
 
             Event::MainEventsCleared => {
                 window.request_redraw();
             }
 
             Event::RedrawRequested(_) => {
-                // draw
-                renderer.draw().expect("render error:");
+                let output_tex = output_surface.surface.get_current_texture().expect("uhh");
+                let output_view = output_tex.texture.create_view(&TextureViewDescriptor {
+                    label: Some("view:output-color"),
+                    ..Default::default()
+                });
+
+                // -- ui
+                let input = egui_state.winit.take_egui_input(&window);
+                egui_state.ctx.begin_frame(input);
+
+                demo_app.ui(&egui_state.ctx);
+
+                let full_output = egui_state.ctx.end_frame();
+                let paint_jobs = egui_state.ctx.tessellate(full_output.shapes);
+                egui_state.winit.handle_platform_output(
+                    &window,
+                    &egui_state.ctx,
+                    full_output.platform_output,
+                );
+
+                // -- render !!
+                let mut encoder = rctx
+                    .device
+                    .create_command_encoder(&CommandEncoderDescriptor {
+                        label: Some("encoder0"),
+                    });
+
+                // upload changed textures
+                let texdelta = full_output.textures_delta;
+                for (tid, imgdelta) in texdelta.set {
+                    egui_state.renderer.update_texture(&rctx.device, &rctx.queue, tid, &imgdelta);
+                }
+
+                // upload buffers
+                let screen_descriptor = egui_wgpu::renderer::ScreenDescriptor {
+                    size_in_pixels: output_surface.dims.into(),
+                    pixels_per_point: window.scale_factor() as f32,
+                };
+                egui_state.renderer.update_buffers(&rctx.device, &rctx.queue, &mut encoder, &paint_jobs, &screen_descriptor);
+
+                {
+                    let mut rp = encoder.begin_render_pass(&RenderPassDescriptor {
+                        label: Some("pass:egui"),
+                        color_attachments: &[Some(RenderPassColorAttachment {
+                            view: &output_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations::default(),
+                        })],
+                        depth_stencil_attachment: None,
+                    });
+
+                    egui_state.renderer.render(&mut rp, &paint_jobs, &screen_descriptor);
+                }
+
+                rctx.queue.submit(iter::once(encoder.finish()));
+                output_tex.present();
+
+                for tid in texdelta.free {
+                    egui_state.renderer.free_texture(&tid);
+                }
             }
 
             _ => (),

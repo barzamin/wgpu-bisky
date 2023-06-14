@@ -25,5 +25,5 @@ fn vert_main(i: VertexIn) -> VertexOut {
 
 @fragment
 fn frag_main(v: VertexOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(0., 0., 0., 1.);
+    return vec4<f32>(1., 0., 0., 1.);
 }
