@@ -1,12 +1,18 @@
 use anyhow::Result;
+use egui::FullOutput;
 use log::debug;
 use pollster::FutureExt;
-use std::{fs, iter, mem, ops::Range};
+use std::{fs, iter, mem, ops::Range, process::Output};
 
 use wgpu::{
-    Adapter, Backends, CompositeAlphaMode, Device, DeviceDescriptor, Features, Instance,
-    InstanceDescriptor, Limits, PresentMode, Queue, RequestAdapterOptions, Surface,
-    SurfaceConfiguration, TextureFormat, TextureUsages, CommandEncoderDescriptor, RenderPassDescriptor, RenderPassColorAttachment, TextureViewDescriptor,
+    Adapter, Backends, BlendState, ColorTargetState, ColorWrites, CommandEncoder,
+    CommandEncoderDescriptor, CompositeAlphaMode, DepthStencilState, Device, DeviceDescriptor,
+    Features, FragmentState, FrontFace, Instance, InstanceDescriptor, Limits, MultisampleState,
+    PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology, Queue,
+    RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, RequestAdapterOptions, ShaderModuleDescriptor, Surface,
+    SurfaceConfiguration, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    VertexAttribute, VertexBufferLayout, VertexFormat, VertexState,
 };
 use winit::{
     dpi::PhysicalSize,
@@ -16,23 +22,11 @@ use winit::{
 };
 
 mod camera;
+mod render;
+mod ui;
 
-struct RenderCtx {
-    instance: Instance,
-    adapter: Adapter,
-    device: Device,
-    queue: Queue,
-}
-/*
-    pipe: RenderPipeline,
-
-    output: MainRenderTarget,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    n_indices: usize,
-    cam_bind_group: wgpu::BindGroup,
-}
-*/
+use crate::ui::EguiState;
+use crate::render::RenderCtx;
 
 struct OutputSurface {
     surface: Surface,
@@ -114,71 +108,78 @@ impl OutputSurface {
     }
 }
 
-impl RenderCtx {
-    pub async fn with_window(window: &Window) -> Result<(Self, Surface)> {
-        let instance = Instance::new(InstanceDescriptor {
-            backends: Backends::DX12 | Backends::VULKAN | Backends::METAL,
-            dx12_shader_compiler: wgpu::Dx12Compiler::Dxc {
-                dxil_path: None,
-                dxc_path: None,
-            }, // todo
-        });
-
-        let window_surface = unsafe { instance.create_surface(window) }?;
-
-        let adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&window_surface),
-            })
-            .await
-            .expect("adapter");
-
-        let (device, queue) = adapter
-            .request_device(
-                &DeviceDescriptor {
-                    label: Some("device0"),
-                    features: Features::empty(),
-                    limits: Limits::default(),
-                },
-                None,
-            )
-            .await?;
-
-        Ok((
-            Self {
-                instance,
-                adapter,
-                device,
-                queue,
-            },
-            window_surface,
-        ))
-    }
+struct BunnyObj {
+    model: tobj::Model,
+    // pipeline: RenderPipeline,
 }
 
-struct EguiState {
-    pub ctx: egui::Context,
+impl BunnyObj {
+    pub fn new() -> Result<Self> {
+        let (mut models, _) = tobj::load_obj("./bunny.obj", &tobj::LoadOptions::default())?;
+        let model = models
+            .pop()
+            .expect("should have at least 1 mesh in bunny.obj");
 
-    pub winit: egui_winit::State,
-    pub renderer: egui_wgpu::Renderer,
-}
+        // let shader_module = rctx.device.create_shader_module(ShaderModuleDescriptor {
+        //     label: Some("pipe0:shader"),
+        //     source: wgpu::ShaderSource::Wgsl(fs::read_to_string("src/shaders/pipe0.wgsl")?.into()),
+        // });
 
-impl EguiState {
-    pub fn new(window: &Window, device: &Device, fb_format: TextureFormat) -> Self {
-        debug!("init egui backends");
+        // let pipelayout = rctx
+        //     .device
+        //     .create_pipeline_layout(&PipelineLayoutDescriptor {
+        //         label: Some("pipe-layout:0"),
+        //         bind_group_layouts: &[],
+        //         push_constant_ranges: &[],
+        //     });
 
-        let context = egui::Context::default();
-        let mut winit_state = egui_winit::State::new(window);
-        winit_state.set_pixels_per_point(window.scale_factor() as f32);
-        let renderer = egui_wgpu::renderer::Renderer::new(device, fb_format, None, 1);
+        // let pipeline = rctx
+        //     .device
+        //     .create_render_pipeline(&RenderPipelineDescriptor {
+        //         label: Some("pipe:0"),
+        //         layout: Some(&pipelayout),
+        //         vertex: VertexState {
+        //             module: &shader_module,
+        //             entry_point: "vert_main",
+        //             buffers: &[VertexBufferLayout {
+        //                 // slot 0
+        //                 array_stride: (mem::size_of::<f32>() * 3) as u64,
+        //                 step_mode: wgpu::VertexStepMode::Vertex,
+        //                 attributes: &[VertexAttribute {
+        //                     format: VertexFormat::Float32x3,
+        //                     offset: 0,
+        //                     shader_location: 0,
+        //                 }],
+        //             }],
+        //         },
+        //         fragment: Some(FragmentState {
+        //             module: &shader_module,
+        //             entry_point: "frag_main",
+        //             targets: &[Some(ColorTargetState {
+        //                 format: output_surface.format,
+        //                 blend: Some(BlendState::REPLACE),
+        //                 write_mask: ColorWrites::ALL,
+        //             })],
+        //         }),
+        //         primitive: PrimitiveState {
+        //             topology: PrimitiveTopology::TriangleList,
+        //             strip_index_format: None,
+        //             polygon_mode: PolygonMode::Fill,
+        //             conservative: false,
+        //             front_face: FrontFace::Ccw, // rhs
+        //             cull_mode: Some(wgpu::Face::Back),
+        //             unclipped_depth: false,
+        //         },
+        //         depth_stencil: None,
+        //         multisample: MultisampleState {
+        //             count: 1,
+        //             mask: !0,
+        //             alpha_to_coverage_enabled: false,
+        //         },
+        //         multiview: None,
+        //     });
 
-        Self {
-            ctx: context,
-            winit: winit_state,
-            renderer,
-        }
+        Ok(Self { model })
     }
 }
 
@@ -187,12 +188,13 @@ async fn run() -> Result<()> {
     let evloop = EventLoop::new();
     let window = WindowBuilder::new().build(&evloop)?;
     let (mut rctx, window_surface) = RenderCtx::with_window(&window).await?;
-    let mut ctx = egui::Context::default();
     let mut output_surface =
         OutputSurface::from_window_surface(&rctx, window_surface, window.inner_size());
 
     let mut egui_state = EguiState::new(&window, &rctx.device, output_surface.format);
     let mut demo_app = egui_demo_lib::DemoWindows::default();
+
+    // let bunny = BunnyObj::new(&rctx)?;
 
     evloop.run(move |ev, tgt, flow| {
         flow.set_poll();
@@ -207,7 +209,6 @@ async fn run() -> Result<()> {
                     match window_event {
                         WindowEvent::CloseRequested => flow.set_exit(),
                         WindowEvent::Resized(_) => {
-                            // egui_state.renderer.
                             output_surface.resize(&rctx, window.inner_size());
                         }
                         _ => (),
@@ -227,18 +228,6 @@ async fn run() -> Result<()> {
                 });
 
                 // -- ui
-                let input = egui_state.winit.take_egui_input(&window);
-                egui_state.ctx.begin_frame(input);
-
-                demo_app.ui(&egui_state.ctx);
-
-                let full_output = egui_state.ctx.end_frame();
-                let paint_jobs = egui_state.ctx.tessellate(full_output.shapes);
-                egui_state.winit.handle_platform_output(
-                    &window,
-                    &egui_state.ctx,
-                    full_output.platform_output,
-                );
 
                 // -- render !!
                 let mut encoder = rctx
@@ -247,39 +236,22 @@ async fn run() -> Result<()> {
                         label: Some("encoder0"),
                     });
 
-                // upload changed textures
-                let texdelta = full_output.textures_delta;
-                for (tid, imgdelta) in texdelta.set {
-                    egui_state.renderer.update_texture(&rctx.device, &rctx.queue, tid, &imgdelta);
-                }
+                let (texdelta, paint_jobs) = egui_state.run(&window, |ctx| {
+                    demo_app.ui(ctx);
+                });
 
-                // upload buffers
-                let screen_descriptor = egui_wgpu::renderer::ScreenDescriptor {
-                    size_in_pixels: output_surface.dims.into(),
-                    pixels_per_point: window.scale_factor() as f32,
-                };
-                egui_state.renderer.update_buffers(&rctx.device, &rctx.queue, &mut encoder, &paint_jobs, &screen_descriptor);
-
-                {
-                    let mut rp = encoder.begin_render_pass(&RenderPassDescriptor {
-                        label: Some("pass:egui"),
-                        color_attachments: &[Some(RenderPassColorAttachment {
-                            view: &output_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations::default(),
-                        })],
-                        depth_stencil_attachment: None,
-                    });
-
-                    egui_state.renderer.render(&mut rp, &paint_jobs, &screen_descriptor);
-                }
+                egui_state.render(
+                    &rctx,
+                    &mut encoder,
+                    &output_view,
+                    window.inner_size(),
+                    window.scale_factor() as f32,
+                    texdelta,
+                    &paint_jobs,
+                );
 
                 rctx.queue.submit(iter::once(encoder.finish()));
                 output_tex.present();
-
-                for tid in texdelta.free {
-                    egui_state.renderer.free_texture(&tid);
-                }
             }
 
             _ => (),
